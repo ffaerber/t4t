@@ -12,14 +12,14 @@ import {ACK_WINDOW_SECONDS, cancelJob, ensureAllowance, makeChain, postJob, time
 import {jobEscrowAbi} from '../../lib/abi'
 import {ModelDiscovery} from './models'
 import {logger} from '../../lib/logger'
-import {PssTransport, uploadChunk, downloadChunk} from '../../lib/swarm'
+import {PssTransport, addressesEqual, uploadChunk, downloadChunk} from '../../lib/swarm'
 import {signEnvelope, clientTopic, providerTopic} from '../../lib/envelope'
 import {EciesCipher, jsonDecrypt, jsonEncrypt} from '../../lib/crypto'
 import {JobsDb} from '../../lib/jobs-db'
 import {loadOrCreatePssKey} from '../../lib/keys'
 import {selectProviderWithDetail, type CandidateProvider} from './selector'
 import {startAdminServer} from './admin'
-import {computeMaxPayment} from '../../lib/token-budget'
+import {computeMaxPayment, contentToText} from '../../lib/token-budget'
 import type {
   Hex,
   JobAckBody,
@@ -194,11 +194,20 @@ export async function startGateway(cfg: GatewayConfig): Promise<void> {
   // Public RPCs like rpc.gnosischain.com are load-balanced/stateless and forget
   // filter ids between requests, producing "filter not found" errors. Stateless
   // getLogs over [last, current] survives that.
-  let lastBlock = await chain.pub.getBlockNumber().catch(() => 0n)
+  //
+  // The cursor is anchored lazily on the first tick that reaches the RPC. It
+  // must never fall back to 0 on error: `fromBlock: 1` asks a public RPC for
+  // every log since genesis, which it refuses, so the catch below would fire
+  // forever and the cursor would never advance past 0.
+  let lastBlock: bigint | null = null
   const JOB_CLAIMED_POLL_MS = 10_000
   setInterval(async () => {
     try {
       const current = await chain.pub.getBlockNumber()
+      if (lastBlock === null) {
+        lastBlock = current > 0n ? current - 1n : 0n
+        return
+      }
       if (current <= lastBlock) return
       const logs = await chain.pub.getContractEvents({
         address: chain.escrow,
@@ -274,9 +283,7 @@ export async function startGateway(cfg: GatewayConfig): Promise<void> {
   const STALE_POSTED_SECONDS = 10 * 60
   async function sweepStalePostedJobs(): Promise<void> {
     const cutoff = Math.floor(Date.now() / 1000) - STALE_POSTED_SECONDS
-    const rows = db.listGatewayJobs({limit: 200}).filter(
-      r => r.status === 'posted' && r.onChainJobId && r.postedAt < cutoff,
-    )
+    const rows = db.listStalePostedGatewayJobs(cutoff)
     if (rows.length === 0) return
     log.info({count: rows.length, cutoffSeconds: STALE_POSTED_SECONDS}, 'sweeping stale posted jobs')
     for (const r of rows) {
@@ -464,11 +471,42 @@ export async function startGateway(cfg: GatewayConfig): Promise<void> {
     }
   }
 
+  /** Authorize an inbound ack/deliver against the job it claims to be for.
+   *
+   *  A signature only proves the envelope came from *some* wallet, and the
+   *  routing id is public: `JobPosted` is an indexed event, `jobs[jobId]`
+   *  exposes `requestHash`, and the routing id is just its keccak. Without
+   *  this check any observer could forge a `job_deliver` to hand our caller
+   *  attacker-chosen content — or force the decrypt to fail, which drops the
+   *  pending slot and clears the failure timers, stranding the escrow.
+   *
+   *  `jobMeta` is written at postJob time and holds the provider we actually
+   *  selected, so it's the authority on who is allowed to answer. */
+  function authorizeJobEnvelope(env: {from: Hex; type: string}, jobId: unknown): boolean {
+    if (typeof jobId !== 'string') return false
+    const meta = jobMeta.get(jobId)
+    if (!meta) {
+      // No record of this job: either it already settled, or it was never
+      // ours. Either way nothing legitimate is waiting on it.
+      log.warn({from: env.from, type: env.type, jobId}, 'dropping envelope for an unknown job')
+      return false
+    }
+    if (!addressesEqual(env.from, meta.provider)) {
+      log.warn(
+        {from: env.from, expected: meta.provider, type: env.type, jobId},
+        'dropping envelope from a wallet that is not this job’s provider',
+      )
+      return false
+    }
+    return true
+  }
+
   pss.subscribe({
     topic: clientTopic(chain.address),
     onEnvelope: async env => {
       if (env.type === 'job_ack') {
         const body = env.body as JobAckBody
+        if (!authorizeJobEnvelope(env, body?.jobId)) return
         log.info({jobId: body.jobId, eta: body.estimatedCompletion}, 'ack received')
         pending.get(body.jobId)?.onProgress?.({
           kind: 'provider_acked',
@@ -516,6 +554,7 @@ export async function startGateway(cfg: GatewayConfig): Promise<void> {
         }
       } else if (env.type === 'job_deliver') {
         const body = env.body as JobDeliverBody
+        if (!authorizeJobEnvelope(env, body?.jobId)) return
         const slot = pending.get(body.jobId)
         if (!slot) return
         try {
@@ -677,7 +716,7 @@ export async function startGateway(cfg: GatewayConfig): Promise<void> {
     // so we can call cancelJob/timeoutJob on liveness failure.
     const jobIdRouting = keccak256(toBytes('0x' + requestHash))
 
-    const promptText = req.messages.map(m => `${m.role}: ${m.content}`).join('\n')
+    const promptText = req.messages.map(m => `${m.role}: ${contentToText(m.content)}`).join('\n')
     db.recordGatewayJob({
       jobId: jobIdRouting,
       onChainJobId,

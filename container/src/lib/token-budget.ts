@@ -5,6 +5,13 @@ import type {OpenAIChatRequest} from './types'
  *  drift but the multiplicative headroom (see `computeMaxPayment`) absorbs it. */
 const CHARS_PER_TOKEN = 4
 
+/** Token charge for a non-text content part (image_url, input_audio, …). We
+ *  can't estimate these from character counts — a base64 data URI is megabytes
+ *  of characters but only ~1k tokens once tiled — so we bill a flat rate near
+ *  OpenAI's high-detail image cost instead. Expressed in chars so it flows
+ *  through the same `/CHARS_PER_TOKEN` divisor as everything else. */
+const NON_TEXT_PART_CHARS = 1024 * CHARS_PER_TOKEN
+
 /** Lower bound for estimated prompt tokens. Stops near-empty requests from
  *  escrowing zero, which would cap the response at no tokens via the same
  *  multiplicative buffer applied to both sides. */
@@ -44,15 +51,76 @@ export class EscrowCapExceededError extends Error {
   }
 }
 
+/**
+ * Character weight of one message's `content`.
+ *
+ * The OpenAI schema allows three shapes here and we have to handle all of
+ * them, because under-counting silently under-sizes the escrow: the provider
+ * still does the work but `claimJob` gets clipped to the too-small
+ * `maxPayment`, so it eats the difference.
+ *
+ *   - string          — the common case, count its characters.
+ *   - null/undefined  — legal on assistant messages that carry `tool_calls`
+ *                       instead of prose. Contributes nothing (but the
+ *                       per-message overhead below still applies).
+ *   - array of parts  — multimodal / "content parts". Text parts count their
+ *                       own characters; anything else is billed at the flat
+ *                       `NON_TEXT_PART_CHARS` rate.
+ *
+ * Anything else (a number, a stray object) falls back to its JSON length,
+ * which over-counts rather than under-counts.
+ */
+export function contentChars(content: unknown): number {
+  if (content == null) return 0
+  if (typeof content === 'string') return content.length
+  if (Array.isArray(content)) {
+    let chars = 0
+    for (const part of content) {
+      if (typeof part === 'string') {
+        chars += part.length
+        continue
+      }
+      const text = (part as {text?: unknown})?.text
+      chars += typeof text === 'string' ? text.length : NON_TEXT_PART_CHARS
+    }
+    return chars
+  }
+  try {
+    return JSON.stringify(content)?.length ?? 0
+  } catch {
+    return NON_TEXT_PART_CHARS
+  }
+}
+
+/** Flatten a message's `content` to plain text for logging / the admin UI's
+ *  prompt column. Non-text parts are elided rather than billed — this is a
+ *  display path, not a pricing one. */
+export function contentToText(content: unknown): string {
+  if (content == null) return ''
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map(part => {
+        if (typeof part === 'string') return part
+        const text = (part as {text?: unknown})?.text
+        if (typeof text === 'string') return text
+        const type = (part as {type?: unknown})?.type
+        return typeof type === 'string' ? `[${type}]` : '[part]'
+      })
+      .join(' ')
+  }
+  return String(content)
+}
+
 /** Estimate prompt tokens from an OpenAI chat request. We sum the character
- *  length of every message's content (plus a small per-message overhead for
+ *  weight of every message's content (plus a small per-message overhead for
  *  the role tag and chat-template boilerplate) and divide by CHARS_PER_TOKEN,
  *  rounding up. This intentionally overshoots — the escrow is a ceiling, the
  *  provider claims the actual count from the inference backend's usage. */
 export function estimatePromptTokens(req: OpenAIChatRequest): bigint {
   let chars = 0
-  for (const m of req.messages) {
-    chars += m.content.length
+  for (const m of req.messages ?? []) {
+    chars += contentChars(m?.content)
     // Chat templates add ~4 tokens per message for the role markers + separators.
     chars += 16
   }

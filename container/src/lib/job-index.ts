@@ -60,7 +60,11 @@ export class JobPostedIndex {
       if (this.lastBlock === 0n) {
         // Anchor cursor to head on first successful tick — match prior
         // watchContractEvent semantics (future events only, no backfill).
-        this.lastBlock = current
+        // Step back one block so the anchor block itself is still scanned:
+        // the next poll starts at `lastBlock + 1`, so anchoring exactly at
+        // head would silently drop a JobPosted mined in that same block, and
+        // the provider would deliver work it can never claim.
+        this.lastBlock = current > 0n ? current - 1n : 0n
         return
       }
       if (current <= this.lastBlock) return

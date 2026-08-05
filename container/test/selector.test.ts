@@ -100,6 +100,14 @@ function mkChain(
           const owner = (args[0] as string).toLowerCase()
           return offerings.get(owner) ?? []
         }
+        if (functionName === 'getProvider') {
+          const owner = (args[0] as string).toLowerCase()
+          return (
+            providers.find(p => p.owner.toLowerCase() === owner) ?? {
+              owner: '0x0000000000000000000000000000000000000000',
+            }
+          )
+        }
         if (functionName === 'openJobs') {
           const owner = (args[0] as string).toLowerCase()
           return BigInt(openJobs.get(owner) ?? 0)
@@ -187,6 +195,56 @@ describe('selectProviderWithDetail', () => {
     const openJobs = new Map<string, number>([[ALICE.toLowerCase(), 0]])
     const chain = mkChain(providers, offerings, openJobs)
     const {chosen, matches} = await selectProviderWithDetail(chain, 'cheapest', {modelId: 'qwen2.5:72b'})
+    expect(chosen).toBeNull()
+    expect(matches).toHaveLength(0)
+  })
+})
+
+describe('selectProviderWithDetail — manual strategy', () => {
+  it('resolves a provider that is not first in the registry', async () => {
+    // Regression: manual mode read only `listProviders(0, 1)` and fell back to
+    // a synthesized stub, which lacked the pssPublicKey/swarmOverlay the
+    // gateway needs to encrypt and route — it threw at encryption time.
+    const providers = [
+      mkProvider({owner: ALICE}),
+      mkProvider({owner: BOB, pssPublicKey: '0xbeef', swarmOverlay: '0xcafe', maxConcurrentJobs: 4}),
+    ]
+    const offerings = new Map<string, ModelOffering[]>([
+      [ALICE.toLowerCase(), [cheapOffering]],
+      [BOB.toLowerCase(), [pricierOffering]],
+    ])
+    const chain = mkChain(providers, offerings, new Map([[BOB.toLowerCase(), 1]]))
+    const {chosen} = await selectProviderWithDetail(chain, 'manual', {
+      modelId: 'llama3:8b',
+      manualProvider: BOB,
+    })
+    expect(chosen?.provider.owner).toBe(BOB)
+    expect(chosen?.provider.pssPublicKey).toBe('0xbeef')
+    expect(chosen?.provider.swarmOverlay).toBe('0xcafe')
+    expect(chosen?.provider.maxConcurrentJobs).toBe(4)
+    expect(chosen?.openJobs).toBe(1)
+  })
+
+  it('honours the manual provider’s real concurrency cap', async () => {
+    const providers = [mkProvider({owner: ALICE}), mkProvider({owner: BOB, maxConcurrentJobs: 2})]
+    const offerings = new Map<string, ModelOffering[]>([[BOB.toLowerCase(), [cheapOffering]]])
+    const chain = mkChain(providers, offerings, new Map([[BOB.toLowerCase(), 2]]))
+    const {chosen, busy} = await selectProviderWithDetail(chain, 'manual', {
+      modelId: 'llama3:8b',
+      manualProvider: BOB,
+    })
+    expect(chosen).toBeNull()
+    expect(busy).toHaveLength(1)
+  })
+
+  it('returns no match for an address that is not registered', async () => {
+    const providers = [mkProvider({owner: ALICE})]
+    const offerings = new Map<string, ModelOffering[]>([[BOB.toLowerCase(), [cheapOffering]]])
+    const chain = mkChain(providers, offerings, new Map())
+    const {chosen, matches} = await selectProviderWithDetail(chain, 'manual', {
+      modelId: 'llama3:8b',
+      manualProvider: BOB,
+    })
     expect(chosen).toBeNull()
     expect(matches).toHaveLength(0)
   })

@@ -80,9 +80,26 @@ export interface ModelOffering {
 
 // ---------- Swarm payload (spec §6) ----------
 
+/** A single entry of an OpenAI "content parts" array (multimodal requests).
+ *  Text parts carry `text`; image/audio parts carry their own payload shape. */
+export interface OpenAIContentPart {
+  type?: string
+  text?: string
+  [k: string]: unknown
+}
+
+/** Everything the OpenAI schema allows in `message.content`: plain text, an
+ *  array of content parts, or null (assistant turns that carry `tool_calls`
+ *  instead of prose). See `lib/token-budget.ts` for how each is priced. */
+export type OpenAIMessageContent = string | OpenAIContentPart[] | null
+
 export interface OpenAIChatRequest {
   model: string
-  messages: Array<{role: 'system' | 'user' | 'assistant' | 'tool'; content: string}>
+  messages: Array<{
+    role: 'system' | 'user' | 'assistant' | 'tool'
+    content: OpenAIMessageContent
+    [k: string]: unknown
+  }>
   temperature?: number
   max_tokens?: number
   stream?: boolean

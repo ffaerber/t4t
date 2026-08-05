@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {escape, formatDuration, formatTs, formatXBZZ, shortHex} from '../src/lib/admin-html'
+import {escape, formatDuration, formatTs, formatXBZZ, parseBzzToPlur, shortHex} from '../src/lib/admin-html'
 
 describe('admin-html helpers', () => {
   it('escapes HTML metacharacters', () => {
@@ -29,5 +29,29 @@ describe('admin-html helpers', () => {
   it('formats unix timestamps', () => {
     expect(formatTs(0)).toBe('—')
     expect(formatTs(1_700_000_000)).toMatch(/^2023-11-14/)
+  })
+})
+
+describe('price form round-trip (regression)', () => {
+  it('the display formatter is lossy and must not feed a form value', async () => {
+    const {plurToBzzExact} = await import('../src/lib/endpoints')
+    // The admin Models page renders each price into an <input value=…> that the
+    // save handler parses straight back to PLUR. Using formatXBZZ there rounded
+    // any price finer than 1e-6 BZZ down on every save — and zeroed anything
+    // below it, making the model free — even when the operator only edited the
+    // other field on the row.
+    const finegrained = 1234n // 1.234e-13 BZZ
+    expect(formatXBZZ(finegrained)).toBe('0.000000')
+    expect(parseBzzToPlur(formatXBZZ(finegrained))).toBe(0n)
+
+    expect(plurToBzzExact(finegrained)).toBe('0.0000000000001234')
+    expect(parseBzzToPlur(plurToBzzExact(finegrained))).toBe(finegrained)
+  })
+
+  it('round-trips prices that survive display truncation too', async () => {
+    const {plurToBzzExact} = await import('../src/lib/endpoints')
+    for (const plur of [0n, 3n * 10n ** 15n, 15n * 10n ** 15n, 10n ** 16n, 123_456_789n]) {
+      expect(parseBzzToPlur(plurToBzzExact(plur))).toBe(plur)
+    }
   })
 })

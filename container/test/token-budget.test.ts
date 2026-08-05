@@ -3,6 +3,7 @@ import type {OpenAIChatRequest} from '../src/lib/types'
 import {
   EscrowCapExceededError,
   computeMaxPayment,
+  contentToText,
   estimatePromptTokens,
   maxAffordableCompletionTokens,
   type ModelPricing,
@@ -181,5 +182,65 @@ describe('maxAffordableCompletionTokens', () => {
     // Verify the rounded cap fits: (inPrice·prompt + outPrice·cap)/1e6 ≤ maxPayment.
     const actualWei = (inPrice * promptCeiling + outPrice * cap) / 1_000_000n
     expect(actualWei).toBeLessThanOrEqual(maxPayment)
+  })
+})
+
+describe('estimatePromptTokens — non-string content shapes', () => {
+  it('treats null content as empty instead of throwing', () => {
+    // Legal on assistant turns that carry `tool_calls` rather than prose.
+    const messages = [{role: 'assistant' as const, content: null}]
+    expect(() => estimatePromptTokens(req({messages}))).not.toThrow()
+    expect(estimatePromptTokens(req({messages}))).toBe(256n)
+  })
+
+  it('counts characters inside content parts, not the number of parts', () => {
+    // Regression: `content.length` on an array returned the part count, so a
+    // 40k-char multimodal prompt priced as the 256-token floor and the
+    // provider ate the difference at claim time.
+    const long = 'x'.repeat(40_000)
+    const messages = [{role: 'user' as const, content: [{type: 'text', text: long}]}]
+    // 40000 chars + 16 overhead = 40016 → ceil(40016/4) = 10004
+    expect(estimatePromptTokens(req({messages}))).toBe(10_004n)
+  })
+
+  it('sums across mixed text parts', () => {
+    const messages = [
+      {
+        role: 'user' as const,
+        content: [
+          {type: 'text', text: 'a'.repeat(2000)},
+          {type: 'text', text: 'b'.repeat(2000)},
+        ],
+      },
+    ]
+    expect(estimatePromptTokens(req({messages}))).toBe(1004n)
+  })
+
+  it('bills non-text parts at a flat rate rather than their payload size', () => {
+    // A base64 data URI is megabytes of characters but ~1k tokens once tiled;
+    // charging by character length would over-escrow by orders of magnitude.
+    const dataUri = 'data:image/png;base64,' + 'A'.repeat(1_000_000)
+    const messages = [
+      {role: 'user' as const, content: [{type: 'image_url', image_url: {url: dataUri}}]},
+    ]
+    // 1024 tokens for the part + 16 chars overhead → 1024 + 4 = 1028
+    expect(estimatePromptTokens(req({messages}))).toBe(1028n)
+  })
+
+  it('falls back to JSON length for unexpected content types', () => {
+    const messages = [{role: 'user' as const, content: {weird: 'x'.repeat(4000)} as never}]
+    expect(estimatePromptTokens(req({messages}))).toBeGreaterThan(900n)
+  })
+})
+
+describe('contentToText', () => {
+  it('passes strings through and flattens parts', () => {
+    expect(contentToText('hello')).toBe('hello')
+    expect(contentToText(null)).toBe('')
+    expect(contentToText([{type: 'text', text: 'a'}, {type: 'text', text: 'b'}])).toBe('a b')
+  })
+
+  it('labels non-text parts by type instead of dumping their payload', () => {
+    expect(contentToText([{type: 'image_url', image_url: {url: 'data:…'}}])).toBe('[image_url]')
   })
 })

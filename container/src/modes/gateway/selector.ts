@@ -1,6 +1,6 @@
 import type {Address} from 'viem'
 import type {ChainClient} from '../../lib/chain'
-import {getOfferings, getOpenJobs, listProviders} from '../../lib/chain'
+import {getOfferings, getOpenJobs, getProvider, listProviders} from '../../lib/chain'
 import type {ModelOffering, ProviderRow} from '../../lib/types'
 
 export type SelectionStrategy = 'cheapest' | 'top_rep_cheapest' | 'manual'
@@ -133,12 +133,18 @@ async function matchOffering(
     o => o.modelId === ctx.modelId && (ctx.maxPrice === undefined || combinedPrice(o) <= ctx.maxPrice),
   )
   if (!offering) return null
-  const {page} = await listProviders(chain, 0n, 1n)
-  // We don't strictly need the row for manual mode, so synthesize the parts
-  // the caller cares about from the offerings call.
-  const provider = (page.find(p => p.owner === owner) ?? {owner, maxConcurrentJobs: 0}) as ProviderRow
+  // Read the row directly rather than scanning `listProviders` — a paged scan
+  // would have to walk the whole registry to find one address, and the caller
+  // needs the real `pssPublicKey` / `swarmOverlay` to encrypt and route the
+  // request. A synthesized stub would blow up at encryption time instead.
+  const provider = await getProvider(chain, owner)
+  if (!provider || isZeroAddress(provider.owner)) return null
   const openJobs = await getOpenJobs(chain, owner).catch(() => 0)
   return {provider, offering, openJobs, atCapacity: isAtCapacity(provider, openJobs)}
+}
+
+function isZeroAddress(a: string | undefined): boolean {
+  return !a || /^0x0{40}$/i.test(a)
 }
 
 function rank(candidates: CandidateProvider[], strategy: SelectionStrategy): CandidateProvider | null {

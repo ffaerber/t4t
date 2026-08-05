@@ -8,7 +8,7 @@ import type {Logger} from '../../lib/logger'
 import type {ModelOffering} from '../../lib/types'
 import type {JobQueue} from './listener'
 import type {InferenceEndpoint} from '../../lib/endpoints'
-import {setDeclaredPrice, writeEndpoints} from '../../lib/endpoints'
+import {plurToBzzExact, setDeclaredPrice, writeEndpoints} from '../../lib/endpoints'
 import type {InferenceRouter} from '../../lib/inference'
 import {
   escape,
@@ -355,8 +355,13 @@ function modelsPage(offerings: ModelOffering[], bzzUsd: number | null): string {
 
 function modelRow(o: ModelOffering): string {
   const formId = `price-${o.modelId.replace(/[^a-zA-Z0-9-_]/g, '-')}`
-  const inputBzz = formatXBZZ(o.inputPricePerMillionTokens)
-  const outputBzz = formatXBZZ(o.outputPricePerMillionTokens)
+  // Exact, not `formatXBZZ`: this string is the form's submitted value, and
+  // the handler parses it straight back to PLUR. The display formatter
+  // truncates at 6 decimals, so round-tripping through it would quietly round
+  // any finer-grained price down — and zero out anything below 1e-6 BZZ —
+  // whenever the operator saves the row, even without editing this field.
+  const inputBzz = plurToBzzExact(o.inputPricePerMillionTokens)
+  const outputBzz = plurToBzzExact(o.outputPricePerMillionTokens)
   return `<tr id="${escape(formId)}">
     <form hx-post="/models/${encodeURIComponent(o.modelId)}/price" hx-target="#${escape(formId)}" hx-swap="outerHTML">
       <td class="mono">${escape(o.modelId)}</td>
