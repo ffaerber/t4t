@@ -312,13 +312,23 @@ export function layout(opts: LayoutOpts): string {
     // Start "now" so we don't replay the entire on-chain history on page load.
     let since = Math.floor(Date.now() / 1000);
     function shorthex(h){ return h && h.length > 12 ? h.slice(0,8) + '…' + h.slice(-4) : (h||''); }
+    // Built with DOM nodes rather than innerHTML: the note carries on-chain
+    // strings (model ids) and the hash lands in an href, so string-splicing
+    // them would be an injection sink for anything the chain can hold.
+    function el(tag, cls, text){
+      const n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (text != null) n.textContent = String(text);
+      return n;
+    }
     function show(t){
-      const div = document.createElement('div');
-      div.className = 'toast';
-      div.innerHTML =
-        '<span class="kind">TX · ' + t.kind + '</span>' +
-        '<a class="hash" href="https://gnosisscan.io/tx/' + t.hash + '" target="_blank" rel="noopener">' + shorthex(t.hash) + '</a>' +
-        (t.note ? '<div class="note">' + t.note.replace(/[<>&]/g, '') + '</div>' : '');
+      const div = el('div', 'toast');
+      div.appendChild(el('span', 'kind', 'TX · ' + t.kind));
+      const a = el('a', 'hash', shorthex(t.hash));
+      a.href = /^0x[0-9a-fA-F]{64}$/.test(String(t.hash || '')) ? 'https://gnosisscan.io/tx/' + t.hash : '#';
+      a.target = '_blank'; a.rel = 'noopener';
+      div.appendChild(a);
+      if (t.note) div.appendChild(el('div', 'note', t.note));
       stack.appendChild(div);
       setTimeout(() => { div.style.transition='opacity .3s'; div.style.opacity='0'; }, 5500);
       setTimeout(() => div.remove(), 6000);

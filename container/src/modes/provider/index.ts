@@ -234,6 +234,17 @@ export async function startProvider(cfg: ProviderConfig): Promise<void> {
       initialStake: PROVIDER_INITIAL_STAKE,
     })
     log.info('registered on-chain')
+  } else if (!existing.active) {
+    // Registered but deactivated. `isLive()` is false, so gateways will never
+    // route to us — and ProviderRegistry has no reactivate path, so heartbeats
+    // won't bring us back. Nothing the container can do about it, but silently
+    // heartbeating into the void is worse than saying so.
+    log.error(
+      {address: chain.address, stake: existing.stake.toString()},
+      'provider is registered but INACTIVE on-chain — deactivate() is irreversible in ' +
+        'ProviderRegistry, so this wallet can no longer receive jobs. Withdraw the stake ' +
+        'after the unbonding period and register from a fresh wallet.',
+    )
   } else if (existing.pssPublicKey.toLowerCase() !== pssKeys.publicKeyX.toLowerCase()) {
     // The registry has a different PSS pubkey than what we just loaded from
     // disk. Clients fetch the on-chain key to encrypt requests, so they will
@@ -562,26 +573,8 @@ export async function startProvider(cfg: ProviderConfig): Promise<void> {
                 outputPricePerMillionTokens: o.outputPricePerMillionTokens,
               }
             },
-            onDelivered: async ({jobIdRouting: routing, responseHash, promptTokens, completionTokens}) => {
-              const onChainJobId = await waitForOnChainJobId(jobIndex, routing)
-              if (!onChainJobId) {
-                log.warn({jobIdRouting: routing}, 'no on-chain jobId after wait; skipping claim')
-                db.recordProviderJob({
-                  jobId: jobIdRouting,
-                  client: env.from,
-                  modelId: env.body.modelId,
-                  status: 'failed',
-                  receivedAt: 0,
-                  ackedAt: null,
-                  completedAt: null,
-                  claimedAt: null,
-                  promptTokens: null,
-                  completionTokens: null,
-                  earnedXBZZ: null,
-                  errorMessage: 'no on-chain jobId observed before timeout',
-                })
-                return
-              }
+            resolveOnChainJob: routing => waitForOnChainJobId(jobIndex, routing),
+            onDelivered: async ({onChainJobId, responseHash, promptTokens, completionTokens}) => {
               const o = offeringsByModel.get(env.body.modelId)
               const inPrice = o?.inputPricePerMillionTokens ?? cfg.T4T_INPUT_PRICE_DEFAULT
               const outPrice = o?.outputPricePerMillionTokens ?? cfg.T4T_OUTPUT_PRICE_DEFAULT

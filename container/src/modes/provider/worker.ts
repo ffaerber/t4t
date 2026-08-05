@@ -39,8 +39,19 @@ export interface WorkerDeps {
   cipher: PayloadCipher
   selfAddress: Hex
   signMessage: (msg: string) => Promise<Hex>
+  /** Resolve the routing id to the on-chain jobId, waiting briefly for the
+   *  chain event to land. Returning null means no `JobPosted` naming us as
+   *  provider carries this requestHash — the notify is unbacked and the job
+   *  must not be worked. */
+  resolveOnChainJob: (jobIdRouting: Hex) => Promise<Hex | null>
   /** Called once the response is uploaded so the listener can submit claimJob. */
-  onDelivered: (args: {jobIdRouting: Hex; responseHash: string; promptTokens: number; completionTokens: number}) => Promise<void>
+  onDelivered: (args: {
+    jobIdRouting: Hex
+    onChainJobId: Hex
+    responseHash: string
+    promptTokens: number
+    completionTokens: number
+  }) => Promise<void>
   /** Optional persistence hook called at each lifecycle stage. */
   onProgress?: (p: WorkerProgress) => void
   /** Resolve per-model pricing so the worker can cap `max_tokens` to whatever
@@ -135,14 +146,35 @@ export async function processJob(deps: WorkerDeps, notify: Envelope<JobNotifyBod
     timestamp: Math.floor(Date.now() / 1000),
   })
 
-  // 2. Fetch + decrypt request.
+  // 2. Prove the job is real before spending any GPU on it.
+  //
+  // The notify is just a signed PSS message on a public topic — anyone can
+  // send one, and the signature only proves it came from *some* wallet, not
+  // that a paying job exists. A hit in the JobPosted index is the proof we
+  // need: it is built from `JobPosted(provider = us)` logs and keyed by
+  // `keccak256(jobs[jobId].requestHash)`, so a match means the chain really
+  // does hold a job naming us as provider for exactly this request. Without
+  // it we'd run the inference and only discover at claim time that there was
+  // never anything to claim.
+  //
+  // We do this *after* the ACK so an honest client never trips the no-ack
+  // slash path while we wait for the event to land.
+  const onChainJobId = await deps.resolveOnChainJob(jobIdRouting)
+  if (!onChainJobId) {
+    throw new Error(
+      `no on-chain JobPosted matches this notify (routing ${jobIdRouting}); refusing to run inference`,
+    )
+  }
+  log.info({onChainJobId}, 'job verified on-chain')
+
+  // 3. Fetch + decrypt request.
   const ct = await downloadChunk({bee: deps.bee, postageBatchId: deps.postageBatchId, logger: log}, body.requestHash)
   const reqPayload = await jsonDecrypt<RequestPayload>(deps.cipher, ct)
   if (reqPayload.openaiRequest.model !== body.modelId) {
     throw new Error(`model mismatch: envelope=${body.modelId} payload=${reqPayload.openaiRequest.model}`)
   }
 
-  // 3. Cap `max_tokens` to whatever the on-chain escrow actually pays for,
+  // 4. Cap `max_tokens` to whatever the on-chain escrow actually pays for,
   //    then run inference. If the gateway under-sized the escrow we'd rather
   //    deliver a shorter answer than overshoot — the contract rejects claims
   //    above `maxPayment` (PaymentTooHigh), which would otherwise force the
@@ -160,7 +192,7 @@ export async function processJob(deps: WorkerDeps, notify: Envelope<JobNotifyBod
     timestamp: Math.floor(Date.now() / 1000),
   })
 
-  // 4. Upload encrypted response.
+  // 5. Upload encrypted response.
   const respPayload: ResponsePayload = {
     v: PROTOCOL_VERSION,
     jobId: body.jobId,
@@ -171,7 +203,7 @@ export async function processJob(deps: WorkerDeps, notify: Envelope<JobNotifyBod
   const respCipher = await jsonEncrypt(deps.cipher, clientPeer.pssPublicKey, respPayload)
   const responseHash = await uploadChunk({bee: deps.bee, postageBatchId: deps.postageBatchId, logger: log}, respCipher)
 
-  // 5. Notify client via PSS.
+  // 6. Notify client via PSS.
   const deliverEnv = await signEnvelope<JobDeliverBody>(
     {
       from: deps.selfAddress,
@@ -200,10 +232,13 @@ export async function processJob(deps: WorkerDeps, notify: Envelope<JobNotifyBod
     timestamp: Math.floor(Date.now() / 1000),
   })
 
-  // 6. Hand back to the listener for on-chain claim.
+  // 7. Hand back to the listener for on-chain claim. `routingFromHash` is
+  //    recomputed from the requestHash rather than trusted from the notify
+  //    body, so a mismatched `jobId` can't redirect the claim.
   const routingFromHash = keccak256(toBytes('0x' + body.requestHash))
   await deps.onDelivered({
     jobIdRouting: routingFromHash,
+    onChainJobId,
     responseHash,
     promptTokens: openaiResponse.usage?.prompt_tokens ?? 0,
     completionTokens: openaiResponse.usage?.completion_tokens ?? 0,

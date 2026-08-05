@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {JobsDb} from '../src/lib/jobs-db'
+import {JobsDb, type GatewayJobRow} from '../src/lib/jobs-db'
 
 function mkDb() {
   return new JobsDb({path: ':memory:'})
@@ -167,5 +167,82 @@ describe('JobsDb client lifecycle', () => {
       promptTokens: null, completionTokens: null, errorMessage: null,
     })
     expect(db.totalSpentXBZZ()).toBe(12n)
+  })
+})
+
+describe('JobsDb sweeper + status queries', () => {
+  function posted(db: JobsDb, jobId: string, postedAt: number, over: Partial<GatewayJobRow> = {}) {
+    db.recordGatewayJob({
+      jobId,
+      onChainJobId: `${jobId}-chain`,
+      provider: 'p',
+      modelId: 'm',
+      status: 'posted',
+      maxPayment: '1',
+      actualPayment: null,
+      postedAt,
+      ackedAt: null,
+      deliveredAt: null,
+      claimedAt: null,
+      prompt: null,
+      response: null,
+      promptTokens: null,
+      completionTokens: null,
+      errorMessage: null,
+      ...over,
+    })
+  }
+
+  it('finds stale posted rows older than the 7d listGatewayJobs window', () => {
+    // Regression: the sweeper filtered `listGatewayJobs`, which windows to 7
+    // days and orders newest-first — so the oldest orphans, the ones it exists
+    // to cancel, were exactly the rows it could not see.
+    const db = mkDb()
+    const now = Math.floor(Date.now() / 1000)
+    posted(db, '0xold', now - 30 * 86400)
+    posted(db, '0xrecent', now - 3600)
+    const stale = db.listStalePostedGatewayJobs(now - 600)
+    expect(stale.map(r => r.jobId)).toEqual(['0xold', '0xrecent'])
+  })
+
+  it('returns stale rows oldest-first and respects the limit', () => {
+    const db = mkDb()
+    const now = Math.floor(Date.now() / 1000)
+    for (let i = 0; i < 5; i++) posted(db, `0x${i}`, now - 10_000 + i)
+    const stale = db.listStalePostedGatewayJobs(now - 600, 2)
+    expect(stale.map(r => r.jobId)).toEqual(['0x0', '0x1'])
+  })
+
+  it('skips rows that are not posted, or have no on-chain id', () => {
+    const db = mkDb()
+    const now = Math.floor(Date.now() / 1000)
+    posted(db, '0xdone', now - 10_000, {status: 'claimed'})
+    posted(db, '0xnochain', now - 10_000, {onChainJobId: null})
+    posted(db, '0xsweep', now - 10_000)
+    expect(db.listStalePostedGatewayJobs(now - 600).map(r => r.jobId)).toEqual(['0xsweep'])
+  })
+
+  it('leaves rows inside the cutoff alone', () => {
+    const db = mkDb()
+    const now = Math.floor(Date.now() / 1000)
+    posted(db, '0xfresh', now - 60)
+    expect(db.listStalePostedGatewayJobs(now - 600)).toHaveLength(0)
+  })
+
+  it('reports the newest success even when later jobs failed', () => {
+    // Regression: the status page read `listGatewayJobs({limit: 1})` and then
+    // filtered it, so "last success" was blank unless the single newest row
+    // happened to be delivered/claimed.
+    const db = mkDb()
+    posted(db, '0xa', 100, {status: 'delivered', deliveredAt: 150})
+    posted(db, '0xb', 200, {status: 'claimed', deliveredAt: 250, claimedAt: 260})
+    posted(db, '0xc', 300, {status: 'cancelled'})
+    expect(db.lastGatewaySuccessAt()).toBe(260)
+  })
+
+  it('returns null when nothing has ever succeeded', () => {
+    const db = mkDb()
+    posted(db, '0xa', 100, {status: 'cancelled'})
+    expect(db.lastGatewaySuccessAt()).toBeNull()
   })
 })

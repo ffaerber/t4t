@@ -272,6 +272,33 @@ export class JobsDb {
     return r.changes
   }
 
+  /** Gateway rows still sitting in `posted` past `cutoffSeconds`, oldest
+   *  first. Deliberately not expressed through `listGatewayJobs`: that one
+   *  windows to the last 7 days and returns newest-first, so the stale rows
+   *  this sweeps — the oldest ones — fall off the end of the page exactly
+   *  when there are enough of them to matter. */
+  listStalePostedGatewayJobs(cutoffSeconds: number, limit = 200): GatewayJobRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM gateway_jobs
+          WHERE status = 'posted' AND onChainJobId IS NOT NULL AND postedAt < ?
+          ORDER BY postedAt ASC LIMIT ?`,
+      )
+      .all(cutoffSeconds, limit) as GatewayJobRow[]
+  }
+
+  /** Timestamp of the most recent job that reached delivered/claimed, or null
+   *  if there has never been one. */
+  lastGatewaySuccessAt(): number | null {
+    const row = this.db
+      .prepare(
+        `SELECT MAX(COALESCE(claimedAt, deliveredAt)) AS ts FROM gateway_jobs
+          WHERE status IN ('delivered', 'claimed')`,
+      )
+      .get() as {ts: number | null} | undefined
+    return row?.ts ?? null
+  }
+
   listGatewayJobs(opts: {sinceSeconds?: number; limit?: number} = {}): GatewayJobRow[] {
     const since = opts.sinceSeconds ?? Math.floor(Date.now() / 1000) - 7 * 86400
     const limit = opts.limit ?? 500

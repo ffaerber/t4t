@@ -433,9 +433,7 @@ async function collectStatus(deps: GatewayAdminDeps): Promise<Record<string, unk
       })
       .catch(() => undefined),
   ])
-  const lastSuccess = deps.db
-    .listGatewayJobs({limit: 1})
-    .find(r => r.status === 'delivered' || r.status === 'claimed')?.deliveredAt
+  const lastSuccess = deps.db.lastGatewaySuccessAt() ?? undefined
   return {
     bee: {url: beeUrl, ok: beeOk, overlay, postageBatchId: deps.postageBatchId},
     chain: {chainId: deps.chain.pub.chain?.id, block, gasBalance, xbzzBalance},

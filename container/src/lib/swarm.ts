@@ -1,7 +1,21 @@
 import {Bee, Topic, type PssSubscription} from '@ethersphere/bee-js'
+import {isAddressEqual} from 'viem'
 import type {Envelope, Hex} from './types'
 import {decodeEnvelope, encodeEnvelope, envelopeKey, DedupCache, verifyEnvelope} from './envelope'
 import type {Logger} from './logger'
+
+/** Address equality that tolerates the garbage an attacker can put in a PSS
+ *  envelope — viem's `isAddressEqual` throws on anything that isn't a
+ *  well-formed address, and a throw here would surface as a decode failure
+ *  rather than a clean drop. */
+export function addressesEqual(a: unknown, b: unknown): boolean {
+  if (typeof a !== 'string' || typeof b !== 'string') return false
+  try {
+    return isAddressEqual(a as Hex, b as Hex)
+  } catch {
+    return false
+  }
+}
 
 export interface SwarmClientOpts {
   bee: Bee
@@ -233,6 +247,19 @@ export class PssTransport {
             if (this.dedup.has(key)) return
             if (!(await verifyEnvelope(env))) {
               this.opts.logger.warn({from: env.from}, 'envelope signature verification failed')
+              return
+            }
+            // A valid signature only proves the envelope came from *some*
+            // wallet — topics are public and derived from an on-chain address,
+            // so anyone can post to ours. Drop anything not addressed to us
+            // before it reaches the handler. Callers still have to authorize
+            // the *sender* against their own job state; see the `from` checks
+            // in the gateway's ack/deliver handlers.
+            if (!addressesEqual(env.to, this.opts.selfAddress)) {
+              this.opts.logger.warn(
+                {from: env.from, to: env.to, type: env.type},
+                'dropping envelope addressed to someone else',
+              )
               return
             }
             this.dedup.mark(key)
