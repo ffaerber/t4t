@@ -38,6 +38,30 @@ node ens-set-contenthash.mjs 0xe40101…           # 2a. dry-run the resolver wr
 node ens-set-contenthash.mjs 0xe40101… --broadcast   # 2b. send it
 ```
 
+Step 2 is not cosmetic. Swarm keeps the chunks a *batch* pays for, so until the
+contenthash points at the new reference the name still resolves to the previous
+upload — and stays hostage to whichever batch stamped it. When that batch
+lapses, the chunks stop being paid for and the site goes down with them.
+
+### Deploying through swarm-stamp-monitor
+
+The Bee node holding these stamps is not on the public internet: its API exposes
+`/wallet`, `/chequebook` and the stamp write endpoints, so it sits behind
+swarm-stamp-monitor instead. Point `BEE_API_URL` at the monitor and add a key:
+
+```bash
+BEE_API_URL=https://stamps.example.com \
+BEE_API_KEY=…                                  \
+POSTAGE_BATCH_ID=0x… \
+npm run deploy
+```
+
+`BEE_API_KEY` is optional and changes nothing when unset, so a local Bee node
+still works exactly as before. The monitor speaks Bee's upload API but
+authenticates per app and **ignores `swarm-postage-batch-id`**, stamping with
+the batch bound to the key's app — so the site cannot be uploaded onto a
+different app's batch by passing the wrong ID.
+
 The deploy script prints both the **Swarm reference** (preview at
 `https://<reference>.bzz.link/`) and the **EIP-1577 contenthash** —
 the latter is what `ens-set-contenthash.mjs` writes onto the resolver.
