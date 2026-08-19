@@ -8,12 +8,19 @@
  *
  * Setting ENS contenthash itself is a manual step — this script just gives
  * you the value to paste into the ENS app.
+ *
+ * BEE_API_KEY is optional and only needed when BEE_API_URL points at
+ * swarm-stamp-monitor rather than a Bee node directly. The monitor speaks
+ * Bee's upload API but authenticates per app, which is what lets the node stay
+ * off the public internet — it also ignores the batch header and uses the
+ * batch assigned to the key's app, so the two cannot drift apart.
  */
 import {readdir, readFile, stat} from 'node:fs/promises'
 import {join, relative, posix} from 'node:path'
 
 const ROOT = 'dist'
 const BEE = process.env.BEE_API_URL ?? 'http://localhost:1633'
+const API_KEY = process.env.BEE_API_KEY
 const BATCH = process.env.POSTAGE_BATCH_ID
 if (!BATCH) {
   console.error('POSTAGE_BATCH_ID env var required (your funded Bee postage stamp).')
@@ -56,6 +63,7 @@ const res = await fetch(`${BEE}/bzz?name=t4t-website`, {
     'swarm-index-document': 'index.html',
     'swarm-error-document': 'index.html',
     'swarm-collection': 'true',
+    ...(API_KEY ? {'x-api-key': API_KEY} : {}),
   },
   body,
 })
