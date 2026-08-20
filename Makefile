@@ -11,7 +11,10 @@ ENS_NAME       ?= t4t.eth
 
 .PHONY: help
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@# -h matters: `-include .env` puts two files in MAKEFILE_LIST, so grep
+	@# prefixes every line with its filename and awk's $$1 became "Makefile"
+	@# for all of them. The list has never shown a target name without it.
+	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
 # ============================================================
 #  Setup
@@ -133,6 +136,53 @@ deploy-local: build-contracts ## Deploy contracts to local Anvil
 		--rpc-url $(LOCAL_RPC_URL) \
 		--private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
 		--broadcast
+
+# ============================================================
+#  Website (t4t.eth)
+# ============================================================
+#
+# Three steps, and the last one is the one that counts. Swarm keeps the chunks
+# a BATCH pays for, so an upload alone changes nothing anyone can see: the name
+# keeps resolving to the previous reference and stays tied to whichever batch
+# stamped it. Until the contenthash moves, a deploy is invisible and the site
+# is hostage to a batch that may be days from expiring.
+#
+#   make website-deploy WEBSITE_BATCH_ID=…      # prints ref + contenthash
+#   make website-ens CONTENTHASH=0xe40101…      # simulate the resolver write
+#   make website-ens-broadcast CONTENTHASH=…    # send it (mainnet, costs gas)
+
+# The postage batch stamping the site. Deliberately NOT defaulted to BATCH_ID:
+# that one belongs to the provider, and sharing a batch between the two means a
+# job response and a deploy can evict each other's chunks.
+WEBSITE_BATCH_ID ?=
+# Only needed when BEE_API_URL points at swarm-stamp-monitor instead of a Bee
+# node — the node holding these stamps is not on the public internet.
+BEE_API_KEY      ?=
+
+.PHONY: website-build
+website-build: ## Build the t4t.eth website into website/dist
+	cd website && npm install --silent && npm run build
+
+.PHONY: website-deploy
+website-deploy: website-build ## Upload website/dist to Swarm; prints ref + ENS contenthash
+	@test -n "$(WEBSITE_BATCH_ID)" || { echo "Set WEBSITE_BATCH_ID (a funded postage batch for the site)"; exit 1; }
+	cd website && BEE_API_URL=$(BEE_API_URL) BEE_API_KEY=$(BEE_API_KEY) \
+		POSTAGE_BATCH_ID=$(WEBSITE_BATCH_ID) node deploy-swarm.mjs
+
+.PHONY: website-ens
+website-ens: ## Dry-run the ENS contenthash update (CONTENTHASH=0xe40101…)
+	@test -n "$(CONTENTHASH)" || { echo "Set CONTENTHASH=0xe40101… (printed by website-deploy)"; exit 1; }
+	@test -n "$$MNEMONIC"     || { echo "Set MNEMONIC in .env";     exit 1; }
+	@test -n "$$ETH_RPC_URL"  || { echo "Set ETH_RPC_URL in .env (Ethereum mainnet, not Gnosis)"; exit 1; }
+	cd website && node ens-set-contenthash.mjs $(CONTENTHASH)
+
+.PHONY: website-ens-broadcast
+website-ens-broadcast: ## Send the ENS contenthash tx for $(ENS_NAME) (MAINNET, costs gas)
+	@test -n "$(CONTENTHASH)" || { echo "Set CONTENTHASH=0xe40101… (printed by website-deploy)"; exit 1; }
+	@test -n "$$MNEMONIC"     || { echo "Set MNEMONIC in .env";     exit 1; }
+	@test -n "$$ETH_RPC_URL"  || { echo "Set ETH_RPC_URL in .env (Ethereum mainnet, not Gnosis)"; exit 1; }
+	@echo "→ Setting contenthash on $(ENS_NAME) (Ethereum mainnet)"
+	cd website && node ens-set-contenthash.mjs $(CONTENTHASH) --broadcast
 
 .PHONY: clean
 clean: ## Remove build artifacts
