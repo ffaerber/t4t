@@ -17,6 +17,20 @@ import type {ModelOffering, ProviderRow} from './types'
  *  the no-ack cancel deadline locally. Keep in sync with the contract. */
 export const ACK_WINDOW_SECONDS = 30
 
+/**
+ * JobEscrow.JobStatus, as the enum is ordered on-chain:
+ *   None, Pending, Acked, Delivered, Claimed, Cancelled, TimedOut
+ *
+ * Only the ones the provider reasons about are named. Note `Delivered` is
+ * declared in the contract and set by nothing — there is no on-chain state for
+ * "work submitted but not yet claimed", which is why an ack is the only thing
+ * standing between finished work and a cancel.
+ */
+export const JOB_STATUS_PENDING = 1
+export const JOB_STATUS_ACKED = 2
+export const JOB_STATUS_CLAIMED = 4
+export const JOB_STATUS_CANCELLED = 5
+
 export interface TxEvent {
   kind: string
   hash: Hex

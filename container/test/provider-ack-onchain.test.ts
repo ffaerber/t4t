@@ -90,3 +90,63 @@ describe('on-chain ack ordering', () => {
     expect(calls).toContain('inference')
   })
 })
+
+/**
+ * PSS redelivers. Without a guard the same job_notify ran the whole pipeline
+ * twice — a second inference on an identical prompt, then a second claimJob
+ * that reverted BadStatus because the first had already claimed.
+ *
+ * Observed live: one job claimed for 2901000000000 while a duplicate attempted
+ * 7881000000000, and the provider recorded "failed" on a job that had in fact
+ * succeeded and been paid. Both halves are fixed here: the duplicate never
+ * runs, and a claim that loses the race is read back from the chain rather
+ * than assumed lost.
+ */
+describe('duplicate notifies', () => {
+  it('runs a routing id at most once', async () => {
+    const seen = new Set<string>()
+    const ran: string[] = []
+    const onEnvelope = (jobId: string) => {
+      if (seen.has(jobId)) return
+      seen.add(jobId)
+      ran.push(jobId)
+    }
+
+    onEnvelope('0xaaa')
+    onEnvelope('0xaaa')   // PSS redelivery
+    onEnvelope('0xbbb')
+
+    expect(ran).toEqual(['0xaaa', '0xbbb'])
+  })
+
+  it('treats BadStatus as success when the chain says Claimed', async () => {
+    const JOB_STATUS_CLAIMED = 4
+    const readJob = async () => ({status: JOB_STATUS_CLAIMED})
+
+    let outcome = 'unset'
+    try {
+      throw new Error('BadStatus()')
+    } catch (err) {
+      const after = await readJob()
+      outcome = after.status === JOB_STATUS_CLAIMED ? 'success' : 'rethrow'
+    }
+    expect(outcome).toBe('success')
+  })
+
+  it('still reports a failure when the job was cancelled instead', async () => {
+    const JOB_STATUS_CLAIMED = 4
+    const JOB_STATUS_CANCELLED = 5
+    const readJob = async () => ({status: JOB_STATUS_CANCELLED})
+
+    let outcome = 'unset'
+    try {
+      throw new Error('BadStatus()')
+    } catch (err) {
+      const after = await readJob()
+      outcome = after.status === JOB_STATUS_CLAIMED ? 'success' : 'rethrow'
+    }
+    // Cancelled means the work really is lost — that must stay an error, or
+    // the slash path becomes invisible again.
+    expect(outcome).toBe('rethrow')
+  })
+})

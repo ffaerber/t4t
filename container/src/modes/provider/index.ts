@@ -9,6 +9,7 @@ import {readPersistedBatch, writePersistedBatch} from '../../lib/postage-state'
 import {privateKeyToAccount} from 'viem/accounts'
 import {
   claimJob,
+  JOB_STATUS_CLAIMED,
   deactivateProvider,
   getOfferings,
   ackJob,
@@ -533,10 +534,31 @@ export async function startProvider(cfg: ProviderConfig): Promise<void> {
     })
   }
 
+  /**
+   * Routing ids already taken up this process.
+   *
+   * PSS is best-effort and redelivers: the same job_notify can arrive twice,
+   * and without this the whole pipeline reran — a second inference on the same
+   * prompt, then a second claimJob that reverted BadStatus because the first
+   * had already claimed. Seen live: one job claimed for 2901000000000 and a
+   * duplicate attempting 7881000000000, recorded as "failed" on a job that had
+   * in fact succeeded and been paid.
+   *
+   * Never deleted. A routing id is claimed at most once for the life of this
+   * process, which is exactly the guarantee wanted — re-running a finished job
+   * has no upside, and the GPU time is the expensive part.
+   */
+  const seenNotifies = new Set<string>()
+
   pss.subscribe({
     topic: providerTopic(chain.address),
     onEnvelope: async env => {
       if (!isJobNotify(env)) return
+      if (seenNotifies.has(env.body.jobId)) {
+        log.info({jobId: env.body.jobId}, 'duplicate job_notify ignored')
+        return
+      }
+      seenNotifies.add(env.body.jobId)
       if (!queue.tryAcquire()) {
         log.warn({inFlight: queue.inFlight}, 'queue full; dropping notify')
         return
@@ -601,12 +623,30 @@ export async function startProvider(cfg: ProviderConfig): Promise<void> {
                   'clipping actualPayment to on-chain maxPayment to avoid PaymentTooHigh',
                 )
               }
-              await claimJob(chain, {
-                jobId: onChainJobId,
-                responseHash: ('0x' + responseHash) as Hex,
-                actualPayment: clipped,
-              })
-              log.info({onChainJobId, actual: clipped.toString()}, 'claim submitted')
+              try {
+                await claimJob(chain, {
+                  jobId: onChainJobId,
+                  responseHash: ('0x' + responseHash) as Hex,
+                  actualPayment: clipped,
+                })
+                log.info({onChainJobId, actual: clipped.toString()}, 'claim submitted')
+              } catch (err) {
+                // BadStatus here is ambiguous: the job may already be Claimed
+                // (this work landed, and something is retrying) or Cancelled
+                // (it did not). Only the chain can tell them apart, and the
+                // difference decides whether this is a success or a loss —
+                // reporting a paid job as failed is what sent us looking for a
+                // bug that was not there.
+                const after = await readJob(chain, onChainJobId).catch(() => null)
+                if (after?.status === JOB_STATUS_CLAIMED) {
+                  log.info(
+                    {onChainJobId},
+                    'claim already recorded on-chain — treating as success',
+                  )
+                } else {
+                  throw err
+                }
+              }
               db.recordProviderJob({
                 jobId: jobIdRouting,
                 client: env.from,
