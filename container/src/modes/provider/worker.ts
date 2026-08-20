@@ -44,6 +44,21 @@ export interface WorkerDeps {
    *  provider carries this requestHash — the notify is unbacked and the job
    *  must not be worked. */
   resolveOnChainJob: (jobIdRouting: Hex) => Promise<Hex | null>
+  /**
+   * Acknowledge the job ON-CHAIN, once it is verified real.
+   *
+   * The PSS ack above is best-effort: it travels over Swarm, and when it
+   * arrives late the client is entitled to cancelJob, which slashes us
+   * MIN_SLASH (1 xBZZ) and leaves the finished work unclaimable with
+   * BadStatus. Measured on the live gateway: 35 jobs posted, 0 acked
+   * on-chain, and roughly a third cancelled that way.
+   *
+   * ackJob moves the job to Acked, and cancelJob requires Pending — so the
+   * slash becomes impossible rather than unlikely, and the provider gets the
+   * full deliveryDeadline instead of a 30-second window. Optional so the
+   * worker stays usable in tests without a chain.
+   */
+  ackOnChain?: (onChainJobId: Hex) => Promise<void>
   /** Called once the response is uploaded so the listener can submit claimJob. */
   onDelivered: (args: {
     jobIdRouting: Hex
@@ -166,6 +181,24 @@ export async function processJob(deps: WorkerDeps, notify: Envelope<JobNotifyBod
     )
   }
   log.info({onChainJobId}, 'job verified on-chain')
+
+  // 2b. Ack on-chain, before spending any GPU.
+  //
+  // Deliberately here and not beside the PSS ack: acking requires the real
+  // jobId, which step 2 just established. Doing it before inference is the
+  // point — it closes the cancel window while the expensive part runs.
+  //
+  // Never fatal. A failed ack costs us the protection, not the job: the work
+  // can still be claimed from Pending as long as the client does not cancel
+  // first, which is exactly the behaviour we had before this existed.
+  if (deps.ackOnChain) {
+    try {
+      await deps.ackOnChain(onChainJobId)
+      log.info({onChainJobId}, 'acked on-chain — cancelJob can no longer slash this job')
+    } catch (err) {
+      log.warn({err, onChainJobId}, 'on-chain ack failed; continuing unprotected from cancelJob')
+    }
+  }
 
   // 3. Fetch + decrypt request.
   const ct = await downloadChunk({bee: deps.bee, postageBatchId: deps.postageBatchId, logger: log}, body.requestHash)
