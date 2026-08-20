@@ -598,6 +598,7 @@ export async function startProvider(cfg: ProviderConfig): Promise<void> {
             },
             resolveOnChainJob: routing => waitForOnChainJobId(jobIndex, routing),
             ackOnChain: async onChainJobId => { await ackJob(chain, onChainJobId) },
+            onChainStatus: async onChainJobId => (await readJob(chain, onChainJobId)).status,
             onDelivered: async ({onChainJobId, responseHash, promptTokens, completionTokens}) => {
               const o = offeringsByModel.get(env.body.modelId)
               const inPrice = o?.inputPricePerMillionTokens ?? cfg.T4T_INPUT_PRICE_DEFAULT

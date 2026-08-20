@@ -150,3 +150,37 @@ describe('duplicate notifies', () => {
     expect(outcome).toBe('rethrow')
   })
 })
+
+/**
+ * The in-memory dedupe spans one process. A notify redelivered across a
+ * restart would otherwise rerun the inference, so the chain is consulted too.
+ *
+ * The important case is the one that must NOT be skipped: a crash mid-job
+ * leaves the work unfinished but still Pending and still claimable, and
+ * refusing it there would convert a recoverable job into a certain slash.
+ * That is why this asks the chain rather than checking a local "seen" row —
+ * a local marker cannot tell "already finished" from "interrupted".
+ */
+describe('resolved jobs are refused across a restart', () => {
+  const PENDING = 1, ACKED = 2, CLAIMED = 4, CANCELLED = 5, TIMED_OUT = 6
+  const shouldRun = (status: number | null) =>
+    status == null || status === PENDING || status === ACKED
+
+  it('refuses a job the chain has already settled', () => {
+    expect(shouldRun(CLAIMED)).toBe(false)
+    expect(shouldRun(CANCELLED)).toBe(false)
+    expect(shouldRun(TIMED_OUT)).toBe(false)
+  })
+
+  it('still runs a job interrupted mid-flight', () => {
+    // The crash-recovery case: unfinished work that can still be claimed.
+    expect(shouldRun(PENDING)).toBe(true)
+    expect(shouldRun(ACKED)).toBe(true)
+  })
+
+  it('runs when the status cannot be read, rather than dropping the job', () => {
+    // A failed RPC must not silently discard paid work — losing a job to a
+    // transient read is worse than repeating one.
+    expect(shouldRun(null)).toBe(true)
+  })
+})

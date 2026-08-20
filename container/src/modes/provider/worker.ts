@@ -5,6 +5,7 @@ import {InferenceRouter} from '../../lib/inference'
 import type {PssTransport} from '../../lib/swarm'
 import {downloadChunk, uploadChunk} from '../../lib/swarm'
 import {estimatePromptTokens, maxAffordableCompletionTokens} from '../../lib/token-budget'
+import {JOB_STATUS_ACKED, JOB_STATUS_PENDING} from '../../lib/chain'
 import type {Bee} from '@ethersphere/bee-js'
 import type {
   Hex,
@@ -59,6 +60,21 @@ export interface WorkerDeps {
    * worker stays usable in tests without a chain.
    */
   ackOnChain?: (onChainJobId: Hex) => Promise<void>
+  /**
+   * Current on-chain status, used to refuse work that is already resolved.
+   *
+   * The in-memory dedupe in the listener only spans one process, so a notify
+   * redelivered across a restart would rerun the inference. The chain does not
+   * forget: a job that is Claimed, Cancelled or TimedOut has nothing left to
+   * do, whatever this process remembers.
+   *
+   * Deliberately NOT a "have I seen this before" flag in our own database.
+   * A crash mid-job leaves a row behind, and skipping on that would turn a job
+   * that is still Pending and still claimable into a guaranteed slash. Asking
+   * what the chain thinks distinguishes "already finished" from "interrupted
+   * and worth resuming"; a local marker cannot.
+   */
+  onChainStatus?: (onChainJobId: Hex) => Promise<number | null>
   /** Called once the response is uploaded so the listener can submit claimJob. */
   onDelivered: (args: {
     jobIdRouting: Hex
@@ -181,6 +197,19 @@ export async function processJob(deps: WorkerDeps, notify: Envelope<JobNotifyBod
     )
   }
   log.info({onChainJobId}, 'job verified on-chain')
+
+  // 2a. Refuse work the chain has already resolved.
+  //
+  // Costs one read and saves a whole inference plus a claim that could only
+  // revert. Pending and Acked are the two states with work outstanding;
+  // anything else means this notify is a duplicate of something finished.
+  if (deps.onChainStatus) {
+    const st = await deps.onChainStatus(onChainJobId).catch(() => null)
+    if (st != null && st !== JOB_STATUS_PENDING && st !== JOB_STATUS_ACKED) {
+      log.info({onChainJobId, status: st}, 'job already resolved on-chain — ignoring redelivered notify')
+      return
+    }
+  }
 
   // 2b. Ack on-chain, before spending any GPU.
   //
