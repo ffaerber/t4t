@@ -28,12 +28,15 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: ghcr.io/token-for-token/t4t
+          # The token-for-token org is being deleted, and ghcr packages do not
+          # follow a repo transfer: this repo moved to ffaerber, its package did
+          # not. Pushing here kept writing into an org that will not exist.
+          images: ghcr.io/ffaerber/t4t
           tags: |
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
           labels: |
-            org.opencontainers.image.source=https://github.com/token-for-token/t4t
+            org.opencontainers.image.source=https://github.com/ffaerber/t4t
 
       - uses: docker/build-push-action@v6
         with:
