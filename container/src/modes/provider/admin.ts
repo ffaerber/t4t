@@ -443,7 +443,15 @@ function statusPanels(s: Record<string, unknown>): string {
   const bee = s.bee as {url: string; ok: boolean; overlay?: string; postageBatchId?: string} | undefined
   const chain = s.chain as {url: string; chainId?: number; block?: bigint; gasBalance?: bigint; xbzzBalance?: bigint} | undefined
   const role = s.role as
-    | {stake?: bigint; openJobs?: number; lastHeartbeat?: number; heartbeatStale?: boolean; active?: boolean; address?: string}
+    | {
+        stake?: bigint
+        openJobs?: number
+        lastHeartbeat?: number
+        heartbeatStale?: boolean
+        stakeBlocked?: boolean
+        active?: boolean
+        address?: string
+      }
     | undefined
   const offerings = (s.offerings ?? []) as ModelOffering[]
   return `
@@ -475,7 +483,9 @@ function statusPanels(s: Record<string, unknown>): string {
     <h2>Provider role</h2>
     <dl class="kv">
       <dt>Active</dt><dd class="${role?.active ? 'ok' : 'warn'}">${role?.active ? 'yes' : 'no'}</dd>
-      <dt>Stake</dt><dd>${escape(formatXBZZ(role?.stake ?? null))} xBZZ</dd>
+      <dt>Stake</dt><dd class="${role?.stakeBlocked ? 'err' : ''}">${escape(formatXBZZ(role?.stake ?? null))} xBZZ${
+        role?.stakeBlocked ? ' — cannot accept jobs; every postJob reverts and the heartbeat is held back' : ''
+      }</dd>
       <dt>Open jobs</dt><dd>${escape(role?.openJobs ?? '—')}</dd>
       <dt>Last heartbeat</dt>
       <dd class="${role?.heartbeatStale ? 'warn' : 'ok'}">${escape(formatTs(role?.lastHeartbeat ?? null))}${role?.heartbeatStale ? ' (stale)' : ''}</dd>
@@ -577,6 +587,11 @@ async function collectStatus(deps: ProviderAdminDeps): Promise<Record<string, un
           openJobs: Number(deps.queue.inFlight),
           lastHeartbeat: Number(provider.lastHeartbeat),
           heartbeatStale: Number(provider.lastHeartbeat) + HEARTBEAT_TTL < now,
+          // Zero stake makes every postJob revert with InsufficientStakeForJob,
+          // in the contract, before any PSS message reaches this node. Nothing
+          // else here would ever show it: no request arrives, so no log line is
+          // written and the panel would look healthy.
+          stakeBlocked: provider.stake === 0n,
         }
       : undefined,
     offerings: [...deps.offerings.values()],
