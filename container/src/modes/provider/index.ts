@@ -13,6 +13,7 @@ import {
   deactivateProvider,
   getOfferings,
   ackJob,
+  getOpenJobs,
   getProvider,
   makeChain,
   readJob,
@@ -488,7 +489,50 @@ export async function startProvider(cfg: ProviderConfig): Promise<void> {
       }
     }
 
-    // 4. Heartbeat — only now do we tell the chain we're alive.
+    // 4. Stake — a heartbeat with no stake advertises a provider that cannot
+    //    take a single job. JobEscrow.postJob computes
+    //    (openJobs + 1) * SLASH_MULT_TIMEOUT * maxPayment and reverts with
+    //    InsufficientStakeForJob when that exceeds the posted stake, so at zero
+    //    it reverts for every job at every price. The client sees the revert;
+    //    we never hear about the job at all, because it dies in the contract
+    //    before any PSS message is sent — which is why this failure is
+    //    invisible from here unless we look it up ourselves.
+    //
+    //    Withholding the heartbeat is the right lever and the only reversible
+    //    one: isLive() is `active && lastHeartbeat + HEARTBEAT_TTL >= now`, so
+    //    liveness lapses within the TTL and comes back on its own once stake is
+    //    restored. deactivate() would also work and can never be undone — there
+    //    is no reactivate path in ProviderRegistry.
+    let stake: bigint
+    try {
+      stake = (await getProvider(chain, chain.address)).stake
+    } catch (err) {
+      log.warn({err}, 'could not read stake; heartbeating anyway')
+      stake = -1n
+    }
+    if (stake === 0n) {
+      const openJobs = await getOpenJobs(chain, chain.address).catch(() => 0)
+      log.error(
+        {address: chain.address, stake: '0', openJobs},
+        'skip heartbeat — provider has NO STAKE: every postJob reverts with ' +
+          'InsufficientStakeForJob and no job will ever reach this node. Send xBZZ to this ' +
+          'address and call addStake on the registry; liveness returns by itself once it lands.',
+      )
+      return
+    }
+    if (stake > 0n) {
+      const floor = await readMinStake(chain).catch(() => PROVIDER_INITIAL_STAKE)
+      if (stake < floor) {
+        // Below the registration floor but not zero: small jobs still post, so
+        // this stays live and says so rather than taking itself offline.
+        log.warn(
+          {address: chain.address, stake: stake.toString(), minStake: floor.toString()},
+          'stake is below MIN_STAKE — larger jobs will revert with InsufficientStakeForJob',
+        )
+      }
+    }
+
+    // 5. Heartbeat — only now do we tell the chain we're alive.
     try {
       await sendHeartbeat(chain)
     } catch (err) {
