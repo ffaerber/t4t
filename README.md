@@ -4,7 +4,7 @@
 
 ![T4T gateway + provider demo](docs/media/t4t-demo.gif)
 
-Live at [t4t.eth](https://t4t.eth.limo). Container image: [`ghcr.io/token-for-token/t4t`](https://github.com/token-for-token/t4t/pkgs/container/t4t). Coordination via Swarm + PSS; payment, escrow, registry, and slashing on Gnosis Chain.
+Live at [t4t.eth](https://t4t.eth.limo). Container image: [`ghcr.io/ffaerber/t4t`](https://github.com/ffaerber/t4t/pkgs/container/t4t). Coordination via Swarm + PSS; payment, escrow, registry, and slashing on Gnosis Chain.
 
 ## Earn xBZZ with your GPU
 
@@ -113,7 +113,7 @@ Prereqs: Foundry, Node ≥ 20, Docker (optional), a Bee node, an Ollama node, an
 make install            # forge install + npm install
 make test               # forge test + vitest (hermetic)
 make build              # forge build + tsc
-make docker             # build container image  (or `docker pull ghcr.io/token-for-token/t4t`)
+make docker             # build container image  (or `docker pull ghcr.io/ffaerber/t4t`)
 ```
 
 ### Fork tests

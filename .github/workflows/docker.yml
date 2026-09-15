@@ -28,9 +28,9 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          # The token-for-token org is being deleted, and ghcr packages do not
-          # follow a repo transfer: this repo moved to ffaerber, its package did
-          # not. Pushing here kept writing into an org that will not exist.
+          # The token-for-token org was deleted. ghcr packages do not follow a
+          # repo transfer -- this repo moved to ffaerber and its package stayed
+          # behind, so builds kept pushing into an org that no longer exists.
           images: ghcr.io/ffaerber/t4t
           tags: |
             type=sha
