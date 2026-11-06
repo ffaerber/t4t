@@ -32,6 +32,7 @@ import {EciesCipher} from '../../lib/crypto'
 import {JobPostedIndex} from '../../lib/job-index'
 import {JobsDb} from '../../lib/jobs-db'
 import {InferenceClient, InferenceRouter} from '../../lib/inference'
+import {ProbeCache} from '../../lib/probe-cache'
 import {
   EndpointsFileError,
   endpointsFilePath,
@@ -345,16 +346,14 @@ export async function startProvider(cfg: ProviderConfig): Promise<void> {
   // published the raw list, on-chain would show e.g. `whisper-large-v3` until
   // the first healthTick filtered it out, and the gateway's /models page would
   // surface a broken model in the meantime. Probing here costs ~one /v1/chat
-  // round-trip per model on cold start — acceptable.
-  const liveModelIds: string[] = []
-  for (const id of modelIds) {
-    try {
-      await inference.probeModel(id)
-      liveModelIds.push(id)
-    } catch (err) {
-      log.warn({err, model: id}, 'startup probe failed; excluding from initial offerings')
-    }
-  }
+  // round-trip per model on cold start — acceptable. Heartbeats re-probe only
+  // models that are new, came back, or failed over an hour ago (ProbeCache).
+  const probes = new ProbeCache(60 * 60 * 1000)
+  const liveModelIds = await probes.live(
+    modelIds,
+    id => inference.probeModel(id),
+    (id, err) => log.warn({err, model: id}, 'startup probe failed; excluding from initial offerings'),
+  )
   if (liveModelIds.length === 0) {
     log.fatal(
       {endpoints: endpoints.map(e => e.name), discovered: modelIds.length},
@@ -458,17 +457,16 @@ export async function startProvider(cfg: ProviderConfig): Promise<void> {
       return
     }
 
-    // 2. Probe each model the backend claims to serve. A model that fails the
-    //    probe is dropped from offerings this round; clients won't route to it.
-    const live: string[] = []
-    for (const id of modelIds) {
-      try {
-        await inference.probeModel(id)
-        live.push(id)
-      } catch (err) {
-        log.warn({err, model: id}, 'model probe failed; dropping from offerings')
-      }
-    }
+    // 2. Probe the models not probed yet (new, back after being gone, or
+    //    failed over an hour ago); the others are live as long as they are
+    //    listed. A probe loads the model, so probing them all every tick would
+    //    keep a local GPU busy (and loading models) around the clock. A model
+    //    that fails the probe is dropped from offerings; clients won't route to it.
+    const live = await probes.live(
+      modelIds,
+      id => inference.probeModel(id),
+      (id, err) => log.warn({err, model: id}, 'model probe failed; dropping from offerings'),
+    )
     if (live.length === 0) {
       log.warn('no models survived probe — skip heartbeat')
       return
